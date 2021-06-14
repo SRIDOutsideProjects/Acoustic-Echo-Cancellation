@@ -384,7 +384,7 @@ class DTLN_model():
         
         # normalize the input to the separation kernel
         encoded_frames_norm = InstantLayerNormalization()(encoded_frames)
-        encoded_frames_norm_ = InstantLayerNormalization()(farend_frames)
+        encoded_frames_norm_ = InstantLayerNormalization()(encoded_frames_)
         
         feature = Concatenate(axis=-1)([encoded_frames_norm,encoded_frames_norm_])
         
@@ -414,33 +414,68 @@ class DTLN_model():
         '''
         
         # input layer for time signal
-        time_dat = Input(batch_shape=(1, self.blockLen))
+        farend_dat = Input(batch_shape=(1, self.blockLen))
+        nearend_dat = Input(batch_shape=(1, self.blockLen))
+        
+        # calculate Segment
+        farend_frames = Lambda(self.segment)(farend_dat)
+        nearend_frames = Lambda(self.segment)(nearend_dat)
+        
         # calculate STFT
-        mag,angle = Lambda(self.fftLayer)(time_dat)
+        farend_mag,farend_angle = Lambda(self.tftLayer)(farend_frames)
+        nearend_mag,nearend_angle = Lambda(self.tftLayer)(nearend_frames)
+        
         # normalizing log magnitude stfts to get more robust against level variations
+
         if norm_stft:
-            mag_norm = InstantLayerNormalization()(tf.math.log(mag + 1e-7))
+            farend_mag_norm = InstantLayerNormalization()(tf.math.log(farend_mag + 1e-7))
         else:
             # behaviour like in the paper
-            mag_norm = mag
+            farend_mag_norm = farend_mag
+        
+        if norm_stft:
+            nearend_mag_norm = InstantLayerNormalization()(tf.math.log(nearend_mag + 1e-7))
+        else:
+            # behaviour like in the paper
+            nearend_mag_norm = nearend_mag
+    
+        
+        spectra = Concatenate(axis=-1)([nearend_mag_norm,farend_mag_norm])
+        
         # predicting mask with separation kernel  
-        mask_1 = self.seperation_kernel(self.numLayer, (self.blockLen//2+1), mag_norm, stateful=True)
+        mask_1 = self.seperation_kernel(self.numLayer, (self.blockLen//2+1), spectra)
+        
         # multiply mask with magnitude
-        estimated_mag = Multiply()([mag, mask_1])
+        estimated_mag = Multiply()([nearend_mag, mask_1])
+        
         # transform frames back to time domain
-        estimated_frames_1 = Lambda(self.ifftLayer)([estimated_mag,angle])
+        estimated_frames_1 = Lambda(self.ifftLayer)([estimated_mag,nearend_angle])
+        
         # encode time domain frames to feature domain
         encoded_frames = Conv1D(self.encoder_size,1,strides=1,use_bias=False)(estimated_frames_1)
+        encoded_frames_ = Conv1D(self.encoder_size,1,strides=1,use_bias=False)(farend_frames)
+        
         # normalize the input to the separation kernel
         encoded_frames_norm = InstantLayerNormalization()(encoded_frames)
+        encoded_frames_norm_ = InstantLayerNormalization()(encoded_frames_)
+        
+        feature = Concatenate(axis=-1)([encoded_frames_norm,encoded_frames_norm_])
+        
         # predict mask based on the normalized feature frames
-        mask_2 = self.seperation_kernel(self.numLayer, self.encoder_size, encoded_frames_norm, stateful=True)
+        mask_2 = self.seperation_kernel(self.numLayer, self.encoder_size, feature)
+        
         # multiply encoded frames with the mask
         estimated = Multiply()([encoded_frames, mask_2]) 
+        
         # decode the frames back to time domain
-        decoded_frame = Conv1D(self.blockLen, 1, padding='causal',use_bias=False)(estimated)
+        decoded_frames = Conv1D(self.blockLen, 1, padding='causal',use_bias=False)(estimated)
+        
+        # create waveform with overlap and add procedure
+        estimated_sig = Lambda(self.overlapAddLayer)(decoded_frames)
+
+        
         # create the model
-        self.model = Model(inputs=time_dat, outputs=decoded_frame)
+        self.model = Model(inputs=[farend_dat,nearend_dat], outputs=estimated_sig)
         # show the model summary
         print(self.model.summary())
         
@@ -472,7 +507,7 @@ class DTLN_model():
         # save model
         tf.saved_model.save(self.model, target_name)
         
-    def create_tf_lite_model(self, weights_file, target_name, use_dynamic_range_quant=False):
+    def create_tf_lite_model(self, weights_file, target_name, norm_stft,use_dynamic_range_quant=False):
         '''
         Method to create a tf lite model folder from a weights file. 
         The conversion creates two models, one for each separation core. 
@@ -485,11 +520,9 @@ class DTLN_model():
 
         '''
         # check for type
-        if weights_file.find('_norm_') != -1:
-            norm_stft = True
-            num_elements_first_core = 2 + self.numLayer * 3 + 2
+        if  norm_stft:
+            num_elements_first_core = 4 + self.numLayer * 3 + 2
         else:
-            norm_stft = False
             num_elements_first_core = self.numLayer * 3 + 2
         # build model    
         self.build_DTLN_model_stateful(norm_stft=norm_stft)
@@ -497,35 +530,47 @@ class DTLN_model():
         self.model.load_weights(weights_file)
         
         #### Model 1 ##########################
-        mag = Input(batch_shape=(1, 1, (self.blockLen//2+1)))
+        farend_mag = Input(batch_shape=(1, 1, (self.blockLen//2+1)))
+        nearend_mag = Input(batch_shape=(1, 1, (self.blockLen//2+1)))
         states_in_1 = Input(batch_shape=(1, self.numLayer, self.numUnits, 2))
         # normalizing log magnitude stfts to get more robust against level variations
         if norm_stft:
-            mag_norm = InstantLayerNormalization()(tf.math.log(mag + 1e-7))
+            farend_mag_norm = InstantLayerNormalization()(tf.math.log(farend_mag + 1e-7))
         else:
             # behaviour like in the paper
-            mag_norm = mag
-        # predicting mask with separation kernel  
-        mask_1, states_out_1 = self.seperation_kernel_with_states(self.numLayer, 
-                                                    (self.blockLen//2+1), 
-                                                    mag_norm, states_in_1)
+            farend_mag_norm = farend_mag
         
-        model_1 = Model(inputs=[mag, states_in_1], outputs=[mask_1, states_out_1])
+        if norm_stft:
+            nearend_mag_norm = InstantLayerNormalization()(tf.math.log(nearend_mag + 1e-7))
+        else:
+            # behaviour like in the paper
+            nearend_mag_norm = nearend_mag
+        
+        spectra = Concatenate(axis=-1)([nearend_mag_norm,farend_mag_norm])
+        # predicting mask with separation kernel
+        mask_1, states_out_1 = self.seperation_kernel_with_states(self.numLayer, (self.blockLen//2+1), spectra, states_in_1)
+        
+        model_1 = Model(inputs=[farend_mag, nearend_mag, states_in_1], outputs=[mask_1, states_out_1])
         
         #### Model 2 ###########################
         
-        estimated_frame_1 = Input(batch_shape=(1, 1, (self.blockLen)))
+        estimated_frames_1 = Input(batch_shape=(1, 1, (self.blockLen)))
+        farend_mag_seg = Input(batch_shape=(1, 1, (self.blockLen)))
         states_in_2 = Input(batch_shape=(1, self.numLayer, self.numUnits, 2))
         
         # encode time domain frames to feature domain
-        encoded_frames = Conv1D(self.encoder_size,1,strides=1,
-                                use_bias=False)(estimated_frame_1)
+        encoded_frames = Conv1D(self.encoder_size,1,strides=1,use_bias=False)(estimated_frames_1)
+        encoded_frames_ = Conv1D(self.encoder_size,1,strides=1,use_bias=False)(farend_mag_seg)
+        
         # normalize the input to the separation kernel
         encoded_frames_norm = InstantLayerNormalization()(encoded_frames)
+        encoded_frames_norm_ = InstantLayerNormalization()(encoded_frames_)
+        
+        feature = Concatenate(axis=-1)([encoded_frames_norm,encoded_frames_norm_])
         # predict mask based on the normalized feature frames
         mask_2, states_out_2 = self.seperation_kernel_with_states(self.numLayer, 
                                                     self.encoder_size, 
-                                                    encoded_frames_norm, 
+                                                    feature, 
                                                     states_in_2)
         # multiply encoded frames with the mask
         estimated = Multiply()([encoded_frames, mask_2]) 
@@ -533,7 +578,7 @@ class DTLN_model():
         decoded_frame = Conv1D(self.blockLen, 1, padding='causal',
                                use_bias=False)(estimated)
         
-        model_2 = Model(inputs=[estimated_frame_1, states_in_2], 
+        model_2 = Model(inputs=[estimated_frames_1, farend_mag_seg, states_in_2], 
                         outputs=[decoded_frame, states_out_2])
         
         # set weights to submodels
