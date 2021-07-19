@@ -21,9 +21,9 @@ path_to_val_mix = '/path/to/noisy/validation/data/'
 # path to folder containing the clean audio validation data
 path_to_val_speech = '/path/to/clean/validation/data/'
 
-path_to_nearend_signal='E:/intern/project1/dataset/nearend_mic_signal/'
-path_to_farend_signal='E:/intern/project1/dataset/farend_speech/'
-path_to_nearend_speech='E:/intern/project1/dataset/nearend_speech/'
+path_to_nearend_signal='dataset_folder_sample/nearend_mic_signal/'
+path_to_farend_signal='dataset_folder_sample/farend_speech/'
+path_to_nearend_speech='dataset_folder_sample/nearend_speech/'
 
 # name your training run
 runName = 'DTLN_model'
