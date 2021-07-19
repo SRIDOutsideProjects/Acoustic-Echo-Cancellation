@@ -10,7 +10,7 @@ import soundfile as sf
 from wavinfo import WavInfoReader
 from random import shuffle, seed
 import numpy as np
-
+from utils import preprocess 
 
 class audio_generator():
     '''
@@ -18,7 +18,7 @@ class audio_generator():
     audio dataset. This audio generator only supports single channel audio files.
     '''
     
-    def __init__(self, path_to_nearend_signal, path_to_farend_signal, path_to_nearend_speech, len_of_samples, fs, train_flag=False):
+    def __init__(self, path_to_nearend_signal, path_to_farend_signal, path_to_rirs, len_of_samples, fs, train_flag=False):
         '''
         Constructor of the audio generator class.
         Inputs:
@@ -31,7 +31,7 @@ class audio_generator():
         # set inputs to properties
         self.path_to_nearend_signal = path_to_nearend_signal
         self.path_to_farend_signal = path_to_farend_signal
-        self.path_to_nearend_speech = path_to_nearend_speech
+        self.path_to_rirs = path_to_rirs
         
         self.len_of_samples = len_of_samples
         self.fs = fs
@@ -47,30 +47,35 @@ class audio_generator():
         Method to list the data of the dataset and count the number of samples. 
         '''
 
-        # list .wav files in directory
-        self.file_names = fnmatch.filter(os.listdir(self.path_to_nearend_signal), '*.wav')
-        # count the number of samples contained in the dataset
-        self.total_samples = 0
-        for file in self.file_names:
-            info = WavInfoReader(os.path.join(self.path_to_nearend_signal, file))
-            self.total_samples = self.total_samples + \
-                int(np.fix(info.data.frame_count/self.len_of_samples))
+        near_speechs=np.load(self.path_to_nearend_signal)
+        far_speechs=np.load(self.path_to_farend_signal)
+        total=min(len(near_speechs),len(far_speechs))
+        self.total_samples=total
     
          
     def create_generator(self):
         '''
         Method to create the iterator. 
         '''
-
-        # check if training or validation
-        if self.train_flag:
-            shuffle(self.file_names)
+        
+        near_speechs=np.load(self.path_to_nearend_signal)
+        far_speechs=np.load(self.path_to_farend_signal)
+        total=min(len(near_speechs),len(far_speechs))
+        self.total_samples=total
+        near_speechs=near_speechs[:total]
+        far_speechs=far_speechs[:total]
+        rirs=np.load(self.path_to_rirs)
         # iterate over the files  
-        for file in self.file_names:
+        shuffle(near_speechs)
+        shuffle(far_speechs)
+        for nearend,farend in zip(near_speechs,far_speechs):
             # read the audio files
-            nearend_signal, fs_1 = sf.read(os.path.join(self.path_to_nearend_signal, file))
-            farend_signal, fs_2 = sf.read(os.path.join(self.path_to_farend_signal, file.replace('nearend_mic','farend_speech')))
-            nearend_speech, fs_3 = sf.read(os.path.join(self.path_to_nearend_speech, file.replace('nearend_mic','nearend_speech')))
+            nearend_signal, fs_1 = sf.read(nearend[:-2])
+            farend_signal, fs_2 = sf.read(farend[:-2])
+            nearend_time=int(nearend[-2:])
+            farend_time=int(farend[-2:])
+            nearend_signal=nearend_signal[self.len_of_samples*(nearend_time-1):self.len_of_samples*(nearend_time)]
+            farend_signal=farend_signal[self.len_of_samples*(nearend_time-1):self.len_of_samples*(nearend_time)]
             # check if the sampling rates are matching the specifications
             if fs_1 != self.fs or fs_2 != self.fs:
                 raise ValueError('Sampling rates do not match.')
@@ -80,16 +85,16 @@ class audio_generator():
             # count the number of samples in one file
             num_samples = int(np.fix(nearend_signal.shape[0]/self.len_of_samples))
             # iterate over the number of samples
-            for idx in range(num_samples):
-                # cut the audio files in chunks
-                nearend_signal_dat = nearend_signal[int(idx*self.len_of_samples):int((idx+1)*
-                                                        self.len_of_samples)]
-                farend_signal_dat = farend_signal[int(idx*self.len_of_samples):int((idx+1)*
-                                                        self.len_of_samples)]
-                nearend_speech_dat = nearend_speech[int(idx*self.len_of_samples):int((idx+1)*
-                                                        self.len_of_samples)]
-                # yield the chunks as float32 data
-                yield {"input_1": farend_signal_dat.astype('float32'), "input_2": nearend_signal_dat.astype('float32')},nearend_speech_dat.astype('float32')
+            
+            selected_rirs=np.random.choice(rirs,2)
+            nearend_rir, fs3=sf.read(selected_rirs[0])
+            if len(nearend_rir.shape)>1:
+                nearend_rir=nearend_rir[:,0]
+            farend_rir, fs3=sf.read(selected_rirs[1])
+            if len(farend_rir.shape)>1:
+                farend_rir=farend_rir[:,0]
+            input_nearend_signal,input_farend_signal,output_discarded_nearend_speech=preprocess(nearend_signal,farend_signal,nearend_rir,farend_rir,fs_1)
+            yield {"input_1": input_farend_signal.astype('float32'), "input_2": input_nearend_signal.astype('float32')},output_discarded_nearend_speech.astype('float32')
               
 
     def create_tf_data_obj(self):
@@ -103,7 +108,6 @@ class audio_generator():
                         output_types=({"input_1": tf.float32, "input_2": tf.float32}, tf.float32),
                         args=None
                         )
-
         
 
 class DTLN_model():
@@ -146,6 +150,7 @@ class DTLN_model():
             for device in physical_devices:
                 tf.config.experimental.set_memory_growth(device, enable=True)
         '''
+        
 
     @staticmethod
     def snr_cost(s_estimate, s_true):
@@ -154,9 +159,9 @@ class DTLN_model():
         The negative signal to noise ratio is calculated here. The loss is 
         always calculated over the last dimension. 
         '''
-
+        print(tf.reduce_mean(tf.math.square(s_true), axis=-1, keepdims=True))
         # calculating the SNR
-        snr = tf.reduce_mean(tf.math.square(s_true), axis=-1, keepdims=True) / \
+        snr = tf.reduce_mean(tf.math.square(s_true), axis=-1, keepdims=True)/ \
             (tf.reduce_mean(tf.math.square(s_true-s_estimate), axis=-1, keepdims=True)+1e-7)
         # using some more lines, because TF has no log10
         num = tf.math.log(snr) 
@@ -197,7 +202,6 @@ class DTLN_model():
         frames = tf.signal.frame(x, self.blockLen, self.block_shift)
         
         return frames
-
 
     def log(self, x):
         '''
@@ -620,7 +624,7 @@ class DTLN_model():
         print('TF lite conversion complete!')
         
     
-    def train_model(self, runName, path_to_nearend_signal, path_to_farend_signal, path_to_nearend_speech):
+    def train_model(self, runName, path_to_nearend_signal, path_to_farend_signal, path_to_rirs):
         '''
         Method to train the DTLN model. 
         '''
@@ -653,7 +657,7 @@ class DTLN_model():
         # create data generator for training data
         generator_input = audio_generator(path_to_nearend_signal, 
                                           path_to_farend_signal,
-                                          path_to_nearend_speech,
+                                          path_to_rirs,
                                           len_in_samples, 
                                           self.fs, train_flag=True)
         dataset = generator_input.tf_data_set
@@ -663,7 +667,7 @@ class DTLN_model():
         # create data generator for validation data
         generator_val = audio_generator(path_to_nearend_signal, 
                                         path_to_farend_signal,
-                                        path_to_nearend_speech,
+                                        path_to_rirs,
                                         len_in_samples, self.fs)
         dataset_val = generator_val.tf_data_set
         dataset_val = dataset_val.batch(self.batchsize, drop_remainder=True).repeat()
@@ -678,7 +682,7 @@ class DTLN_model():
             verbose=1,
             validation_data=dataset_val,
             validation_steps=steps_val, 
-            callbacks=[checkpointer, reduce_lr, csv_logger, early_stopping],
+            callbacks=[checkpointer, reduce_lr, csv_logger],
             max_queue_size=50,
             workers=4,
             use_multiprocessing=True)

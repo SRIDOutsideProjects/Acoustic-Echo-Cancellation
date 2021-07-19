@@ -21,9 +21,9 @@ path_to_val_mix = '/path/to/noisy/validation/data/'
 # path to folder containing the clean audio validation data
 path_to_val_speech = '/path/to/clean/validation/data/'
 
-path_to_nearend_signal='dataset_folder_sample/nearend_mic_signal/'
-path_to_farend_signal='dataset_folder_sample/farend_speech/'
-path_to_nearend_speech='dataset_folder_sample/nearend_speech/'
+path_to_nearend_signal='meta/nearend_speech_chunk_list.npy'
+path_to_farend_signal='meta/farend_speech_chunk_list.npy'
+path_to_rirs='meta/Rirs.npy'
 
 # name your training run
 runName = 'DTLN_model'
@@ -34,7 +34,7 @@ modelTrainer.build_DTLN_model(norm_stft=True)
 # compile it with optimizer and cost function for training
 modelTrainer.compile_model()
 # train the model
-modelTrainer.train_model(runName, path_to_nearend_signal, path_to_farend_signal, path_to_nearend_speech)
+modelTrainer.train_model(runName, path_to_nearend_signal, path_to_farend_signal, path_to_rirs)
 
 
 
